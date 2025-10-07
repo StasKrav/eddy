@@ -133,9 +133,10 @@ func loadFiles(dir string, showHidden bool) []fileItem {
         return nil
     }
     var items []fileItem
-    if parent := filepath.Dir(dir); parent != dir {
-        items = append(items, fileItem{name: "..", path: parent, isDir: true})
-    }
+    //Удаляем добавление ".." в начало списка файлов
+    //if parent := filepath.Dir(dir); parent != dir {
+    //  items = append(items, fileItem{name: "..", path: parent, isDir: true})
+    //}
     for _, e := range entries {
         if !showHidden && strings.HasPrefix(e.Name(), ".") {
             continue
@@ -369,7 +370,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         mPtr.ta.SetHeight(mPtr.height - 2) // Увеличил высоту, чтобы скрыть полосу прокрутки
         mPtr.vp.Width = rightW - 1
         mPtr.vp.Height = mPtr.height - 2
-        mPtr.clampLeftOffset()  // Важно вызывать clampLeftOffset после изменения размеров окна
+        mPtr.clampLeftOffset() // Важно вызывать clampLeftOffset после изменения размеров окна
         return *mPtr, nil
 
     case tea.KeyMsg:
@@ -619,7 +620,7 @@ Tab        — переключить Редактор ↔ Предпросмо�
 Ctrl+S     — сохранить файл
 Ctrl+←/→   — переключить активную панель
 ?          — показать/скрыть справку
-Ctrl+q     — выйти`
+Ctrl+Q     — выйти`
     helpStyle := lipgloss.NewStyle().
         Width(60).
         Border(lipgloss.RoundedBorder()).
