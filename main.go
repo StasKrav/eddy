@@ -28,6 +28,7 @@ type keyMap struct {
     SwitchLeft, SwitchRight key.Binding
     Tab, Help, Close        key.Binding
     Quit                    key.Binding
+    ShowPath                key.Binding // Добавлена клавиша для отображения пути
 }
 
 func newKeyMap() keyMap {
@@ -46,6 +47,7 @@ func newKeyMap() keyMap {
         Help:         key.NewBinding(key.WithKeys("?")),
         Close:        key.NewBinding(key.WithKeys("esc")),
         Quit:         key.NewBinding(key.WithKeys("ctrl+q")),
+        ShowPath:     key.NewBinding(key.WithKeys("p")), // Клавиша "p" для отображения пути
     }
 }
 
@@ -83,6 +85,9 @@ type model struct {
 
     deletingFile bool
     deleteTarget *fileItem
+
+    showPathPopup bool // Флаг для отображения popup с путем
+    filePath      string // Строка для хранения пути файла
 }
 
 // ---------------- initialization ----------------
@@ -122,6 +127,8 @@ func initialModel() model {
         active:     "left",
         showHelp:   false,
         keys:       newKeyMap(),
+        showPathPopup: false, // Изначально не показываем popup
+        filePath:      "",
     }
 }
 
@@ -497,6 +504,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             }
             return *mPtr, nil
         }
+
+        // Обработка нажатия клавиши "p"
+        if key.Matches(msg, mPtr.keys.ShowPath) && mPtr.current != "" {
+            mPtr.showPathPopup = true      // Показываем popup
+            mPtr.filePath = mPtr.current // Установим путь к текущему файлу
+            return *mPtr, nil
+        }
+
+        // Закрытие popup с путем по нажатию Esc
+        if mPtr.showPathPopup && msg.Type == tea.KeyEsc {
+            mPtr.showPathPopup = false // Закрываем popup
+            return *mPtr, nil
+        }
+
         // левая панель
         if mPtr.active == "left" {
             visible := mPtr.height - 4
@@ -607,6 +628,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // ---------------- view ----------------
 
+// pathPopup - Отображает popup окно с путем к файлу
+func (m model) pathPopup() string {
+    pathText := fmt.Sprintf("Путь к файлу:\n%s", m.filePath) // Используем filePath из модели
+    pathStyle := lipgloss.NewStyle().
+        Width(60).
+        Border(lipgloss.RoundedBorder()).
+        BorderForeground(lipgloss.Color("205")).
+        Padding(1, 2)
+    return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, pathStyle.Render(pathText))
+}
+
 func (m model) helpPopup() string {
     helpText := `Справка
 
@@ -620,7 +652,8 @@ Tab        — переключить Редактор ↔ Предпросмо�
 Ctrl+S     — сохранить файл
 Ctrl+←/→   — переключить активную панель
 ?          — показать/скрыть справку
-Ctrl+Q     — выйти`
+Ctrl+Q     — выйти
+p          — показать путь к файлу`
     helpStyle := lipgloss.NewStyle().
         Width(60).
         Border(lipgloss.RoundedBorder()).
@@ -638,6 +671,9 @@ func (m model) truncateString(s string, width int) string {
 }
 
 func (m model) View() string {
+    if m.showPathPopup {
+        return m.pathPopup() // Отображаем popup с путем, если showPathPopup true
+    }
     if m.showHelp {
         return m.helpPopup()
     }
