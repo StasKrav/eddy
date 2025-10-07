@@ -619,7 +619,7 @@ Tab        — переключить Редактор ↔ Предпросмо�
 Ctrl+S     — сохранить файл
 Ctrl+←/→   — переключить активную панель
 ?          — показать/скрыть справку
-Esc / q    — выйти`
+Ctrl+q     — выйти`
     helpStyle := lipgloss.NewStyle().
         Width(60).
         Border(lipgloss.RoundedBorder()).
