@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/alecthomas/chroma/v2"
@@ -17,6 +18,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
+	"golang.org/x/term"
 )
 
 // ---------------- key bindings ----------------
@@ -34,21 +37,21 @@ type keyMap struct {
 
 func newKeyMap() keyMap {
 	return keyMap{
-		Up:          key.NewBinding(key.WithKeys("up")),
-		Down:        key.NewBinding(key.WithKeys("down")),
-		Open:        key.NewBinding(key.WithKeys("right")),
-		Back:        key.NewBinding(key.WithKeys("left")),
-		Save:        key.NewBinding(key.WithKeys("ctrl+s")),
-		NewFile:     key.NewBinding(key.WithKeys("ctrl+n")),
-		Delete:      key.NewBinding(key.WithKeys("ctrl+d")),
+		Up:           key.NewBinding(key.WithKeys("up")),
+		Down:         key.NewBinding(key.WithKeys("down")),
+		Open:         key.NewBinding(key.WithKeys("right")),
+		Back:         key.NewBinding(key.WithKeys("left")),
+		Save:         key.NewBinding(key.WithKeys("ctrl+s")),
+		NewFile:      key.NewBinding(key.WithKeys("ctrl+n")),
+		Delete:       key.NewBinding(key.WithKeys("ctrl+d")),
 		ToggleHidden: key.NewBinding(key.WithKeys(".")),
-		SwitchLeft:  key.NewBinding(key.WithKeys("ctrl+left")),
-		SwitchRight: key.NewBinding(key.WithKeys("ctrl+right")),
-		Tab:         key.NewBinding(key.WithKeys("tab")),
-		Help:        key.NewBinding(key.WithKeys("?")),
-		Close:       key.NewBinding(key.WithKeys("esc")),
-		Quit:        key.NewBinding(key.WithKeys("ctrl+q")),
-		ShowPath:    key.NewBinding(key.WithKeys("ctrl+p")), // Изменена клавиша "p" на "Ctrl+p" для отображения пути
+		SwitchLeft:   key.NewBinding(key.WithKeys("ctrl+left")),
+		SwitchRight:  key.NewBinding(key.WithKeys("ctrl+right")),
+		Tab:          key.NewBinding(key.WithKeys("tab")),
+		Help:         key.NewBinding(key.WithKeys("?")),
+		Close:        key.NewBinding(key.WithKeys("esc")),
+		Quit:         key.NewBinding(key.WithKeys("ctrl+q")),
+		ShowPath:     key.NewBinding(key.WithKeys("ctrl+p")), // Изменена клавиша "p" на "Ctrl+p" для отображения пути
 	}
 }
 
@@ -64,6 +67,8 @@ type model struct {
 	width     int
 	height    int
 	leftWidth int
+	ready     bool
+	lastWrap  int
 
 	cwd        string     // current working directory
 	files      []fileItem // files in cwd
@@ -96,6 +101,23 @@ type model struct {
 	tocCursor    int
 	tocOffset    int
 	returnTarget string // "edit" или "preview"
+}
+
+// message sent when markdown renderer is built asynchronously
+type rendererReadyMsg struct{ r *glamour.TermRenderer }
+
+// async command to build a glamour renderer with given wrap width
+func buildRendererCmd(wrap int) tea.Cmd {
+	if wrap < 1 {
+		wrap = 80
+	}
+	return func() tea.Msg {
+		r, _ := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(wrap),
+		)
+		return rendererReadyMsg{r: r}
+	}
 }
 
 // ---- TOC heading ----
@@ -132,18 +154,32 @@ func initialModel() model {
 	ta.Blur()
 
 	vp := viewport.New(0, 0)
+	// Try to get initial terminal size to avoid undersized first render
+	w, h, termOK := 0, 0, false
+	if tw, th, err := term.GetSize(int(os.Stdout.Fd())); err == nil && tw > 0 && th > 0 {
+		w, h, termOK = tw, th, true
+	}
+	rightW := 80
+	if termOK {
+		rightW = w - 36 - 4
+		if rightW < 20 {
+			rightW = 20
+		}
+	}
+	// Build a minimal renderer now (cheap) — we will rebuild async after size known
 	renderer, _ := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(80),
+		glamour.WithWordWrap(rightW-1),
 	)
 
 	cwd, _ := os.Getwd()           // current working directory
 	files := loadFiles(cwd, false) // load files in cwd
 
-	return model{
+	m := model{
 		width:         100,
 		height:        30,
 		leftWidth:     36,
+		ready:         false,
 		cwd:           cwd,
 		files:         files,
 		cursor:        0,
@@ -165,6 +201,16 @@ func initialModel() model {
 		tocOffset:     0,
 		returnTarget:  "",
 	}
+	if termOK {
+		m.width, m.height = w, h
+		m.ready = true
+		m.ta.SetWidth(rightW - 1)
+		m.ta.SetHeight(m.height - 2)
+		m.vp.Width = rightW - 1
+		m.vp.Height = m.height - 2
+		m.lastWrap = rightW - 1
+	}
+	return m
 }
 
 // ---------------- helpers ----------------
@@ -175,6 +221,7 @@ func loadFiles(dir string, showHidden bool) []fileItem {
 		return nil
 	}
 	var items []fileItem
+
 	for _, e := range entries {
 		if !showHidden && strings.HasPrefix(e.Name(), ".") {
 			continue
@@ -185,6 +232,14 @@ func loadFiles(dir string, showHidden bool) []fileItem {
 			isDir: e.IsDir(),
 		})
 	}
+
+	// Sort: directories first, then files; alphabetical by name
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].isDir != items[j].isDir {
+			return items[i].isDir && !items[j].isDir
+		}
+		return strings.ToLower(items[i].name) < strings.ToLower(items[j].name)
+	})
 	return items
 }
 
@@ -258,10 +313,15 @@ func (m *model) clampLeftOffset() {
 // ---------------- update ----------------
 
 func (m model) Init() tea.Cmd {
+	if m.ready {
+		rightW := m.width - m.leftWidth - 4
+		if rightW < 20 {
+			rightW = 20
+		}
+		return buildRendererCmd(rightW - 1)
+	}
 	return nil
 }
-
-
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -269,6 +329,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	mPtr := &m
 
 	switch msg := msg.(type) {
+	case rendererReadyMsg:
+		if msg.r != nil {
+			mPtr.renderer = msg.r
+		}
+		return *mPtr, nil
 	case tea.WindowSizeMsg:
 		mPtr.width, mPtr.height = msg.Width, msg.Height
 		rightW := mPtr.width - mPtr.leftWidth - 4
@@ -279,12 +344,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		mPtr.ta.SetHeight(mPtr.height - 2)
 		mPtr.vp.Width = rightW - 1
 		mPtr.vp.Height = mPtr.height - 2
+		mPtr.ready = true
+		// Rebuild renderer asynchronously only if wrap changed
+		if wrap := rightW - 1; wrap != mPtr.lastWrap {
+			mPtr.lastWrap = wrap
+			cmd = buildRendererCmd(wrap)
+		}
 		mPtr.clampLeftOffset()
 		// clamp TOC offset in case height changed
 		if mPtr.tocOffset < 0 {
 			mPtr.tocOffset = 0
 		}
-		return *mPtr, nil
+		return *mPtr, cmd
 
 	case tea.KeyMsg:
 		if key.Matches(msg, mPtr.keys.Help) {
@@ -342,10 +413,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// --- Удаление файла (Ctrl+D) ---
 		if key.Matches(msg, mPtr.keys.Delete) && mPtr.active == "left" && len(mPtr.files) > 0 {
 			it := mPtr.files[mPtr.cursor]
-			if it.name != ".." {
-				mPtr.deletingFile = true
-				mPtr.deleteTarget = &it
-			}
+			mPtr.deletingFile = true
+			mPtr.deleteTarget = &it
 			return *mPtr, nil
 		}
 		if mPtr.deletingFile {
@@ -542,17 +611,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return *mPtr, nil
 			}
 
-			// Enter — возвращаемся в панель, откуда пришли (и скрываем TOC)
+			// Enter — просто закрыть TOC и вернуться туда, откуда пришли
 			if msg.Type == tea.KeyEnter {
 				if mPtr.returnTarget == "edit" {
 					mPtr.mode = "edit"
 					mPtr.active = "right"
 					mPtr.ta.Focus()
-					// можно добавить прыжок к строке: mPtr.tocHeadings[mPtr.tocCursor].Line
 				} else if mPtr.returnTarget == "preview" {
 					mPtr.mode = "preview"
 					mPtr.active = "right"
 				}
+				mPtr.tocVisible = false
+				return *mPtr, nil
+			}
+
+			// Right Arrow — перейти к выбранному заголовку (в редактор)
+			if key.Matches(msg, mPtr.keys.Open) && len(mPtr.tocHeadings) > 0 {
+				// вычисляем позицию курсора по началу строки заголовка
+				targetLine := mPtr.tocHeadings[mPtr.tocCursor].Line
+				content := mPtr.ta.Value()
+				lines := strings.Split(content, "\n")
+				pos := 0
+				if targetLine > 0 {
+					if targetLine > len(lines) {
+						targetLine = len(lines)
+					}
+					for i := 0; i < targetLine; i++ {
+						pos += len(lines[i]) + 1 // +1 за символ переноса строки
+					}
+				}
+				// перемещаем фокус в редактор и ставим курсор
+				mPtr.mode = "edit"
+				mPtr.active = "right"
+				mPtr.ta.Focus()
+				// безопасный сдвиг курсора: ограничим диапазоном [0, len(content)]
+				if pos < 0 {
+					pos = 0
+				}
+				if pos > len(content) {
+					pos = len(content)
+				}
+				mPtr.ta.SetCursor(pos)
 				mPtr.tocVisible = false
 				return *mPtr, nil
 			}
@@ -621,102 +720,97 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	
 
 	return *mPtr, nil
 }
 
 func (m *model) openSelected() {
-    if len(m.files) == 0 || m.cursor < 0 || m.cursor >= len(m.files) {
-        return
-    }
-    it := m.files[m.cursor]
-    if it.isDir {
-        oldPath := m.cwd
-        m.cwd = it.path
-        m.files = loadFiles(m.cwd, m.showHidden)
+	if len(m.files) == 0 || m.cursor < 0 || m.cursor >= len(m.files) {
+		return
+	}
+	it := m.files[m.cursor]
+	if it.isDir {
+		oldPath := m.cwd
+		m.cwd = it.path
+		m.files = loadFiles(m.cwd, m.showHidden)
 
-        if filepath.Dir(oldPath) == m.cwd {
-            base := filepath.Base(oldPath)
-            for i, f := range m.files {
-                if f.isDir && f.name == base {
-                    m.cursor = i
-                    break
-                }
-            }
-        } else {
-            if len(m.files) > 0 {
-                m.cursor = 0
-                if m.files[0].name == ".." && len(m.files) > 1 {
-                    m.cursor = 1
-                }
-            } else {
-                m.cursor = 0
-            }
-        }
+		if filepath.Dir(oldPath) == m.cwd {
+			base := filepath.Base(oldPath)
+			for i, f := range m.files {
+				if f.isDir && f.name == base {
+					m.cursor = i
+					break
+				}
+			}
+		} else {
+			if len(m.files) > 0 {
+				m.cursor = 0
+			} else {
+				m.cursor = 0
+			}
+		}
 
-        m.clampLeftOffset()
-        return
-    }
-    data, err := os.ReadFile(it.path)
-    if err != nil {
-        m.ta.SetValue(fmt.Sprintf("Ошибка чтения: %v", err))
-        m.current = ""
-        return
-    }
+		m.clampLeftOffset()
+		return
+	}
+	data, err := os.ReadFile(it.path)
+	if err != nil {
+		m.ta.SetValue(fmt.Sprintf("Ошибка чтения: %v", err))
+		m.current = ""
+		return
+	}
 
-    content := string(data)
-    highlightedContent := content
-    if strings.HasSuffix(strings.ToLower(it.path), ".go") || strings.HasSuffix(strings.ToLower(it.path), ".py") {
-        if highlighted, err := highlightSyntax(content, it.path); err == nil {
-            highlightedContent = highlighted
-        }
-    }
+	content := string(data)
+	highlightedContent := content
+	if strings.HasSuffix(strings.ToLower(it.path), ".go") || strings.HasSuffix(strings.ToLower(it.path), ".py") {
+		if highlighted, err := highlightSyntax(content, it.path); err == nil {
+			highlightedContent = highlighted
+		}
+	}
 
-    m.ta.SetValue(content) // В редакторе показываем оригинальный текст без подсветки
-    m.current = it.path
+	m.ta.SetValue(content) // В редакторе показываем оригинальный текст без подсветки
+	m.current = it.path
 
-    if strings.HasSuffix(strings.ToLower(it.path), ".md") {
-        out, err := m.renderer.Render(content)
-        if err != nil {
-            m.vp.SetContent(highlightedContent)
-        } else {
-            m.vp.SetContent(out)
-        }
-    } else {
-        m.vp.SetContent(highlightedContent)
-    }
-    m.mode = "edit"
-    m.active = "right"
-    m.ta.Focus()
+	if strings.HasSuffix(strings.ToLower(it.path), ".md") {
+		out, err := m.renderer.Render(content)
+		if err != nil {
+			m.vp.SetContent(highlightedContent)
+		} else {
+			m.vp.SetContent(out)
+		}
+	} else {
+		m.vp.SetContent(highlightedContent)
+	}
+	m.mode = "edit"
+	m.active = "right"
+	m.ta.Focus()
 }
 
 func (m *model) saveCurrent() {
-    if m.current == "" {
-        return
-    }
-    _ = os.WriteFile(m.current, []byte(m.ta.Value()), 0644)
+	if m.current == "" {
+		return
+	}
+	_ = os.WriteFile(m.current, []byte(m.ta.Value()), 0644)
 
-    content := m.ta.Value()
-    displayContent := content
-    if strings.HasSuffix(strings.ToLower(m.current), ".go") || strings.HasSuffix(strings.ToLower(m.current), ".py") {
-        if highlighted, err := highlightSyntax(content, m.current); err == nil {
-            displayContent = highlighted
-        }
-    }
+	content := m.ta.Value()
+	displayContent := content
+	if strings.HasSuffix(strings.ToLower(m.current), ".go") || strings.HasSuffix(strings.ToLower(m.current), ".py") {
+		if highlighted, err := highlightSyntax(content, m.current); err == nil {
+			displayContent = highlighted
+		}
+	}
 
-    if strings.HasSuffix(strings.ToLower(m.current), ".md") {
-        out, err := m.renderer.Render(content)
-        if err != nil {
-            m.vp.SetContent(displayContent)
-        } else {
-            m.vp.SetContent(out)
-        }
-    } else {
-        m.vp.SetContent(displayContent)
-    }
+	if strings.HasSuffix(strings.ToLower(m.current), ".md") {
+		out, err := m.renderer.Render(content)
+		if err != nil {
+			m.vp.SetContent(displayContent)
+		} else {
+			m.vp.SetContent(out)
+		}
+	} else {
+		m.vp.SetContent(displayContent)
+	}
 }
-
 
 // ---------------- view ----------------
 
@@ -746,7 +840,8 @@ Ctrl+←/→   — переключить активную панель
 ?          — показать/скрыть справку
 Ctrl+Q     — выйти
 Ctrl+P     — показать путь к файлу
-Ctrl+T     — показать/скрыть TOC (для .md)`
+Ctrl+T     — показать/скрыть TOC (для .md)
+→ (в TOC)  — перейти к выбранному заголовку`
 	helpStyle := lipgloss.NewStyle().
 		Width(60).
 		Border(lipgloss.RoundedBorder()).
@@ -757,13 +852,27 @@ Ctrl+T     — показать/скрыть TOC (для .md)`
 
 // truncateString обрезает строку до заданной ширины и добавляет "..." в конце
 func (m model) truncateString(s string, width int) string {
-	if len(s) > width {
-		return s[:width-3] + "..."
+	// width-aware by display cells, safe for CJK/emoji
+	if width <= 0 {
+		return ""
 	}
-	return s
+	if runewidth.StringWidth(s) <= width {
+		return s
+	}
+	ell := "..."
+	ellW := runewidth.StringWidth(ell)
+	target := width - ellW
+	if target < 1 {
+		return runewidth.Truncate(s, width, "")
+	}
+	return runewidth.Truncate(s, target, "") + ell
 }
 
 func (m model) View() string {
+	// Avoid rendering layout until we know actual terminal size
+	if !m.ready {
+		return ""
+	}
 	if m.showPathPopup {
 		return m.pathPopup()
 	}
@@ -792,12 +901,12 @@ func (m model) View() string {
 		innerH = 1
 	}
 
-	leftStyle := lipgloss.NewStyle().Width(m.leftWidth).Height(innerH + 2).MarginTop(1).Padding(0, 1).Border(lipgloss.RoundedBorder())
+	leftStyle := lipgloss.NewStyle().Width(m.leftWidth).Height(innerH+2).MarginTop(1).Padding(0, 1).Border(lipgloss.RoundedBorder())
 	rightW := m.width - m.leftWidth - 4
 	if rightW < 20 {
 		rightW = 20
 	}
-	rightStyle := lipgloss.NewStyle().Width(rightW).Height(innerH + 1).MarginTop(1).Padding(0, 0).Border(lipgloss.RoundedBorder())
+	rightStyle := lipgloss.NewStyle().Width(rightW).Height(innerH+1).MarginTop(1).Padding(0, 0).Border(lipgloss.RoundedBorder())
 
 	if m.active == "left" {
 		leftStyle = leftStyle.BorderForeground(lipgloss.Color("205"))
@@ -824,33 +933,32 @@ func (m model) View() string {
 
 		var b strings.Builder
 		for i := start; i < end; i++ {
-		    h := m.tocHeadings[i]
-		    indent := strings.Repeat("  ", h.Level-1)
-		
-		    // ширина панели без рамок и паддингов
-		    contentWidth := m.leftWidth - 4 // рамка + Padding(0,1)
-		    maxLen := contentWidth - len(indent)
-		    if maxLen < 1 {
-		        maxLen = 1
-		    }
-		
-		    title := m.truncateString(h.Title, maxLen)
-		    line := fmt.Sprintf("%s%s", indent, title)
-		
-		    // Стилизация ТОЛЬКО после обрезания
-		    if i == m.tocCursor {
-		        // убираем всё лишнее форматирование, только цвет и bold
-		        line = lipgloss.NewStyle().
-		            Foreground(lipgloss.Color("205")).
-		            Bold(true).
-		            Width(contentWidth). // выравнивание по ширине без расширения
-		            MaxWidth(contentWidth).
-		            Render(line)
-		    }
-		
-		    b.WriteString(line + "\n")
+			h := m.tocHeadings[i]
+			indent := strings.Repeat("  ", h.Level-1)
+
+			// ширина панели без рамок и паддингов
+			contentWidth := m.leftWidth - 4 // рамка + Padding(0,1)
+			maxLen := contentWidth - len(indent)
+			if maxLen < 1 {
+				maxLen = 1
+			}
+
+			title := m.truncateString(h.Title, maxLen)
+			line := fmt.Sprintf("%s%s", indent, title)
+
+			// Стилизация ТОЛЬКО после обрезания
+			if i == m.tocCursor {
+				// убираем всё лишнее форматирование, только цвет и bold
+				line = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("205")).
+					Bold(true).
+					Width(contentWidth). // выравнивание по ширине без расширения
+					MaxWidth(contentWidth).
+					Render(line)
+			}
+
+			b.WriteString(line + "\n")
 		}
-		
 
 		// pad to visible
 		written := end - start
@@ -860,9 +968,9 @@ func (m model) View() string {
 
 		tocStyle := lipgloss.NewStyle().
 			Width(m.leftWidth).
-			Height(innerH + 2).
+			Height(innerH+2).
 			MarginTop(1).
-//			Padding(0, 1).
+			Padding(0, 1).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("205"))
 
@@ -912,9 +1020,6 @@ func (m model) View() string {
 
 	return "\n" + lipgloss.JoinHorizontal(lipgloss.Bottom, left, right)
 }
-
-
-
 
 // ---------------- main ----------------
 
