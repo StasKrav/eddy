@@ -28,7 +28,7 @@ type keyMap struct {
     SwitchLeft, SwitchRight key.Binding
     Tab, Help, Close        key.Binding
     Quit                    key.Binding
-    ShowPath                key.Binding // Добавлена клавиша для отображения пути
+    ShowPath                key.Binding // Клавиша для отображения пути
 }
 
 func newKeyMap() keyMap {
@@ -64,16 +64,16 @@ type model struct {
     height    int
     leftWidth int
 
-    cwd        string
-    files      []fileItem
-    cursor     int
-    leftOffset int
-    showHidden bool
+    cwd        string   // current working directory
+    files      []fileItem // files in cwd
+    cursor     int      // which file is selected
+    leftOffset int      // offset for scrolling the left pane
+    showHidden bool     // show hidden files
 
-    ta       textarea.Model
-    vp       viewport.Model
+    ta       textarea.Model // text area for editing files
+    vp       viewport.Model // viewport for previewing files
     renderer *glamour.TermRenderer
-    current  string
+    current  string // current file being edited
     mode     string // "edit" or "preview"
 
     active   string // "left" or "right"
@@ -97,8 +97,6 @@ func initialModel() model {
     ta.Placeholder = " ** -> ** Откроет файл в панели редактора"
     ta.ShowLineNumbers = true
     ta.Cursor.Style = lipgloss.NewStyle().UnsetForeground()
-    // Попытка отключить полосу прокрутки
-    // ta.SetShowScrollbar(false) // Закомментировано, так как не уверен в существовании такого метода
     ta.Blur()
 
     vp := viewport.New(0, 0)
@@ -107,8 +105,8 @@ func initialModel() model {
         glamour.WithWordWrap(80),
     )
 
-    cwd, _ := os.Getwd()
-    files := loadFiles(cwd, false)
+    cwd, _ := os.Getwd()       // current working directory
+    files := loadFiles(cwd, false) // load files in cwd
 
     return model{
         width:      100,
@@ -140,10 +138,6 @@ func loadFiles(dir string, showHidden bool) []fileItem {
         return nil
     }
     var items []fileItem
-    //Удаляем добавление ".." в начало списка файлов
-    //if parent := filepath.Dir(dir); parent != dir {
-    //  items = append(items, fileItem{name: "..", path: parent, isDir: true})
-    //}
     for _, e := range entries {
         if !showHidden && strings.HasPrefix(e.Name(), ".") {
             continue
@@ -159,7 +153,6 @@ func loadFiles(dir string, showHidden bool) []fileItem {
 
 // highlightSyntax применяет подсветку синтаксиса к содержимому файла
 func highlightSyntax(content, filename string) (string, error) {
-    // Определяем лексер по расширению файла
     var lexer chroma.Lexer
     switch {
     case strings.HasSuffix(strings.ToLower(filename), ".go"):
@@ -174,13 +167,11 @@ func highlightSyntax(content, filename string) (string, error) {
         return content, nil
     }
 
-    // Получаем итератор токенов
     iterator, err := lexer.Tokenise(nil, content)
     if err != nil {
         return content, err
     }
 
-    // Используем терминальный форматтер и стиль
     formatter := formatters.Get("terminal")
     if formatter == nil {
         return content, nil
@@ -191,7 +182,6 @@ func highlightSyntax(content, filename string) (string, error) {
         style = styles.Fallback
     }
 
-    // Форматируем в строку
     var buf strings.Builder
     err = formatter.Format(&buf, style, iterator)
     if err != nil {
@@ -201,58 +191,38 @@ func highlightSyntax(content, filename string) (string, error) {
     return buf.String(), nil
 }
 
-// --- исправленный clamp ---
+// clampLeftOffset корректирует leftOffset для плавного скролла списка файлов
 func (m *model) clampLeftOffset() {
-    // Проверяем, что у нас есть файлы для отображения
-    if len(m.files) == 0 {
+    // visible - количество видимых элементов в списке файлов
+    visible := m.height - 4
+
+    // Если файлов для отображения меньше, чем видимых элементов,
+    // то leftOffset всегда должен быть 0.
+    if len(m.files) <= visible {
         m.leftOffset = 0
-        m.cursor = 0
         return
     }
 
-    visible := m.height - 4
-    if visible < 1 {
-        visible = 1
-    }
-
-    // Проверяем границы курсора
-    if m.cursor < 0 {
-        m.cursor = 0
-    } else if m.cursor >= len(m.files) {
-        m.cursor = len(m.files) - 1
-    }
-
-    // Корректируем leftOffset относительно позиции курсора
+    // Если текущий курсор находится выше области видимости,
+    // устанавливаем leftOffset равным курсору.
     if m.cursor < m.leftOffset {
         m.leftOffset = m.cursor
-    } else if m.cursor >= m.leftOffset+visible {
+    }
+
+    // Если текущий курсор находится ниже области видимости,
+    // устанавливаем leftOffset так, чтобы курсор был виден.
+    if m.cursor >= m.leftOffset+visible {
         m.leftOffset = m.cursor - visible + 1
     }
 
-    // Проверяем границы leftOffset
+    // leftOffset не может быть меньше 0.
     if m.leftOffset < 0 {
         m.leftOffset = 0
     }
 
-    maxOffset := 0
-    if len(m.files) > visible {
-        maxOffset = len(m.files) - visible
-    }
-    if m.leftOffset > maxOffset {
-        m.leftOffset = maxOffset
-    }
-
-    // Дополнительная проверка для предотвращения подпрыгивания
-    if m.leftOffset < 0 {
-        m.leftOffset = 0
-    }
-    // Убеждаемся, что leftOffset не превышает количество файлов
-    if m.leftOffset >= len(m.files) {
-        m.leftOffset = len(m.files) - 1
-    }
-    // Если leftOffset отрицательный, устанавливаем в 0
-    if m.leftOffset < 0 {
-        m.leftOffset = 0
+    // leftOffset не может быть больше, чем (количество файлов - количество видимых элементов).
+    if m.leftOffset > len(m.files)-visible {
+        m.leftOffset = len(m.files) - visible
     }
 }
 
@@ -266,9 +236,7 @@ func (m *model) openSelected() {
         m.cwd = it.path
         m.files = loadFiles(m.cwd, m.showHidden)
 
-        // --- фикс: восстановление курсора при возврате в родительскую папку ---
         if filepath.Dir(oldPath) == m.cwd {
-            // ищем директорию, из которой пришли
             base := filepath.Base(oldPath)
             for i, f := range m.files {
                 if f.isDir && f.name == base {
@@ -277,11 +245,8 @@ func (m *model) openSelected() {
                 }
             }
         } else {
-            // При входе в новую директорию - устанавливаем курсор на первый элемент
-            // но проверяем, есть ли файлы
             if len(m.files) > 0 {
                 m.cursor = 0
-                // Если есть "..", ставим курсор на первый файл после него
                 if m.files[0].name == ".." && len(m.files) > 1 {
                     m.cursor = 1
                 }
@@ -290,8 +255,6 @@ func (m *model) openSelected() {
             }
         }
 
-        // Вместо сброса leftOffset в 0, оставляем его как есть
-        // и позволяем clampLeftOffset() вычислить правильное значение
         m.clampLeftOffset()
         return
     }
@@ -302,7 +265,6 @@ func (m *model) openSelected() {
         return
     }
 
-    // Применяем подсветку синтаксиса для Go и Python файлов
     content := string(data)
     highlightedContent := content
     if strings.HasSuffix(strings.ToLower(it.path), ".go") || strings.HasSuffix(strings.ToLower(it.path), ".py") {
@@ -314,7 +276,6 @@ func (m *model) openSelected() {
     m.ta.SetValue(content) // В редакторе показываем оригинальный текст без подсветки
     m.current = it.path
 
-    // Для предпросмотра используем подсвеченный текст для Go/Python файлов
     if strings.HasSuffix(strings.ToLower(it.path), ".md") {
         out, err := m.renderer.Render(content)
         if err != nil {
@@ -336,7 +297,6 @@ func (m *model) saveCurrent() {
     }
     _ = os.WriteFile(m.current, []byte(m.ta.Value()), 0644)
 
-    // Применяем подсветку синтаксиса для Go и Python файлов
     content := m.ta.Value()
     displayContent := content
     if strings.HasSuffix(strings.ToLower(m.current), ".go") || strings.HasSuffix(strings.ToLower(m.current), ".py") {
@@ -452,15 +412,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                     if err != nil {
                         mPtr.ta.SetValue(fmt.Sprintf("Ошибка удаления: %v", err))
                     } else {
-                        // Перезагружаем список файлов
                         mPtr.files = loadFiles(mPtr.cwd, mPtr.showHidden)
-                        // Подстраиваем курсор после удаления
                         if oldCursor >= len(mPtr.files) {
                             mPtr.cursor = len(mPtr.files) - 1
                         } else {
                             mPtr.cursor = oldCursor
                         }
-                        // Проверяем, что курсор в допустимых пределах
                         if mPtr.cursor < 0 || len(mPtr.files) == 0 {
                             mPtr.cursor = 0
                         }
@@ -483,8 +440,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if key.Matches(msg, mPtr.keys.ToggleHidden) {
             mPtr.showHidden = !mPtr.showHidden
             mPtr.files = loadFiles(mPtr.cwd, mPtr.showHidden)
-            // Вместо сброса leftOffset в 0, позволяем clampLeftOffset() вычислить правильное значение
-            // Проверяем, что курсор в допустимых пределах
             if mPtr.cursor >= len(mPtr.files) {
                 mPtr.cursor = len(mPtr.files) - 1
             }
@@ -553,7 +508,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                     mPtr.cwd = parent
                     mPtr.files = loadFiles(mPtr.cwd, mPtr.showHidden)
 
-                    // --- фикс: вернуться к директории, из которой пришли ---
                     base := filepath.Base(oldPath)
                     found := false
                     for i, f := range mPtr.files {
@@ -563,12 +517,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                             break
                         }
                     }
-                    // Если не нашли директорию, ставим курсор на первый элемент
                     if !found && len(mPtr.files) > 0 {
                         mPtr.cursor = 0
                     }
-                    // Вместо сброса leftOffset в 0, оставляем его как есть
-                    // и позволяем clampLeftOffset() вычислить правильное значение
                     mPtr.clampLeftOffset()
                 }
                 return *mPtr, nil
@@ -586,7 +537,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 return *mPtr, nil
             }
             if mPtr.mode == "edit" {
-                // Применяем подсветку синтаксиса для Go и Python файлов
                 content := mPtr.ta.Value()
                 displayContent := content
                 if strings.HasSuffix(strings.ToLower(mPtr.current), ".go") || strings.HasSuffix(strings.ToLower(mPtr.current), ".py") {
