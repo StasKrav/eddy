@@ -33,21 +33,21 @@ type keyMap struct {
 
 func newKeyMap() keyMap {
     return keyMap{
-        Up:           key.NewBinding(key.WithKeys("up")),
-        Down:         key.NewBinding(key.WithKeys("down")),
-        Open:         key.NewBinding(key.WithKeys("right")),
-        Back:         key.NewBinding(key.WithKeys("left")),
-        Save:         key.NewBinding(key.WithKeys("ctrl+s")),
-        NewFile:      key.NewBinding(key.WithKeys("ctrl+n")),
-        Delete:       key.NewBinding(key.WithKeys("ctrl+d")),
+        Up:          key.NewBinding(key.WithKeys("up")),
+        Down:        key.NewBinding(key.WithKeys("down")),
+        Open:        key.NewBinding(key.WithKeys("right")),
+        Back:        key.NewBinding(key.WithKeys("left")),
+        Save:        key.NewBinding(key.WithKeys("ctrl+s")),
+        NewFile:     key.NewBinding(key.WithKeys("ctrl+n")),
+        Delete:      key.NewBinding(key.WithKeys("ctrl+d")),
         ToggleHidden: key.NewBinding(key.WithKeys(".")),
-        SwitchLeft:   key.NewBinding(key.WithKeys("ctrl+left")),
-        SwitchRight:  key.NewBinding(key.WithKeys("ctrl+right")),
-        Tab:          key.NewBinding(key.WithKeys("tab")),
-        Help:         key.NewBinding(key.WithKeys("?")),
-        Close:        key.NewBinding(key.WithKeys("esc")),
-        Quit:         key.NewBinding(key.WithKeys("ctrl+q")),
-        ShowPath:     key.NewBinding(key.WithKeys("p")), // Клавиша "p" для отображения пути
+        SwitchLeft:  key.NewBinding(key.WithKeys("ctrl+left")),
+        SwitchRight: key.NewBinding(key.WithKeys("ctrl+right")),
+        Tab:         key.NewBinding(key.WithKeys("tab")),
+        Help:        key.NewBinding(key.WithKeys("?")),
+        Close:       key.NewBinding(key.WithKeys("esc")),
+        Quit:        key.NewBinding(key.WithKeys("ctrl+q")),
+        ShowPath:    key.NewBinding(key.WithKeys("ctrl+p")), // Изменена клавиша "p" на "Ctrl+p" для отображения пути
     }
 }
 
@@ -86,7 +86,7 @@ type model struct {
     deletingFile bool
     deleteTarget *fileItem
 
-    showPathPopup bool // Флаг для отображения popup с путем
+    showPathPopup bool   // Флаг для отображения popup с путем
     filePath      string // Строка для хранения пути файла
 }
 
@@ -94,7 +94,7 @@ type model struct {
 
 func initialModel() model {
     ta := textarea.New()
-    ta.Placeholder = "Откройте файл в левой панели"
+    ta.Placeholder = " ** -> ** Откроет файл в панели редактора"
     ta.ShowLineNumbers = true
     ta.Cursor.Style = lipgloss.NewStyle().UnsetForeground()
     // Попытка отключить полосу прокрутки
@@ -122,9 +122,9 @@ func initialModel() model {
         ta:         ta,
         vp:         vp,
         renderer:   renderer,
-        current:    "",
+        current:  "",
         mode:       "edit",
-        active:     "left",
+        active:   "left",
         showHelp:   false,
         keys:       newKeyMap(),
         showPathPopup: false, // Изначально не показываем popup
@@ -359,7 +359,9 @@ func (m *model) saveCurrent() {
 
 // ---------------- update ----------------
 
-func (m model) Init() tea.Cmd { return nil }
+func (m model) Init() tea.Cmd {
+    return nil
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     var cmd tea.Cmd
@@ -505,7 +507,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             return *mPtr, nil
         }
 
-        // Обработка нажатия клавиши "p"
+        // Обработка нажатия клавиши "Ctrl+p"
         if key.Matches(msg, mPtr.keys.ShowPath) && mPtr.current != "" {
             mPtr.showPathPopup = true      // Показываем popup
             mPtr.filePath = mPtr.current // Установим путь к текущему файлу
@@ -653,7 +655,7 @@ Ctrl+S     — сохранить файл
 Ctrl+←/→   — переключить активную панель
 ?          — показать/скрыть справку
 Ctrl+Q     — выйти
-p          — показать путь к файлу`
+Ctrl+P     — показать путь к файлу`
     helpStyle := lipgloss.NewStyle().
         Width(60).
         Border(lipgloss.RoundedBorder()).
@@ -695,13 +697,14 @@ func (m model) View() string {
     }
 
     innerH := m.height - 4
-    leftStyle := lipgloss.NewStyle().Width(m.leftWidth).Height(innerH).MarginTop(1).Padding(0, 1)
+    // Применяем стиль с рамкой к левой панели. Рамка левой панели такая же высоты, что и рамка правой панели
+    leftStyle := lipgloss.NewStyle().Width(m.leftWidth).Height(innerH + 2).MarginTop(1).Padding(0, 1).Border(lipgloss.RoundedBorder())
     rightW := m.width - m.leftWidth - 4
     if rightW < 20 {
         rightW = 20
     }
     // Изменяем стиль правой панели, чтобы скрыть полосу прокрутки
-    rightStyle := lipgloss.NewStyle().Width(rightW).Height(innerH+1).MarginTop(1).Padding(0, 0).Border(lipgloss.RoundedBorder())
+    rightStyle := lipgloss.NewStyle().Width(rightW).Height(innerH + 1).MarginTop(1).Padding(0, 0).Border(lipgloss.RoundedBorder())
 
     if m.active == "left" {
         leftStyle = leftStyle.BorderForeground(lipgloss.Color("205"))
