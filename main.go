@@ -624,7 +624,10 @@ func (m model) helpPopup() string {
 ?          — показать/скрыть справку
 Ctrl+Q     — выйти
 Ctrl+P     — показать путь к файлу
-Ctrl+T     — показать/скрыть TOC (для .md)`
+T          — показать/скрыть TOC (для .md)
+F          — показать/скрыть файловый менеджер
+
+`
 	helpStyle := lipgloss.NewStyle().
 		Width(60).
 		Border(lipgloss.RoundedBorder()).
