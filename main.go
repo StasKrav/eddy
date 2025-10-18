@@ -383,6 +383,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return *mPtr, nil
 		}
+		// переключение между панелями по Tab
+		if key.Matches(msg, mPtr.keys.Tab) {
+			switch mPtr.active {
+			case "left":
+				if mPtr.tocVisible {
+					mPtr.active = "toc"
+				} else {
+					mPtr.active = "right"
+				}
+			case "toc":
+				mPtr.active = "right"
+			case "right":
+				mPtr.active = "left"
+			}
+			return *mPtr, nil
+		}
 
 		// left panel navigation
 		if mPtr.active == "left" {
@@ -493,14 +509,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					mPtr.vp.SetContent(out)
 				}
 
-				mPtr.tocVisible = false
+				// mPtr.tocVisible = false
 				mPtr.active = "right"
 				return *mPtr, nil
 			}
 
 			// Esc — close TOC
 			if key.Matches(msg, mPtr.keys.Close) {
-				mPtr.tocVisible = false
+				// mPtr.tocVisible = false
 				mPtr.active = "right"
 				return *mPtr, nil
 			}
