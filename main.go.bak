@@ -1,4 +1,3 @@
-// main.go (упрощённая версия: только просмотр, TOC работает для preview)
 package main
 
 import (
@@ -8,13 +7,13 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	// "unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -26,12 +25,14 @@ import (
 // ---------------- key bindings ----------------
 
 type keyMap struct {
-	Up, Down         key.Binding
-	Open, Back       key.Binding
-	ToggleHidden     key.Binding
-	Tab, Help, Close key.Binding
-	Quit             key.Binding
-	ShowPath         key.Binding
+	Up, Down                key.Binding
+	Open, Back              key.Binding
+	Save, NewFile, Delete   key.Binding
+	ToggleHidden            key.Binding
+	SwitchLeft, SwitchRight key.Binding
+	Tab, Help, Close        key.Binding
+	Quit                    key.Binding
+	ShowPath                key.Binding // Клавиша для отображения пути
 }
 
 func newKeyMap() keyMap {
@@ -40,12 +41,17 @@ func newKeyMap() keyMap {
 		Down:         key.NewBinding(key.WithKeys("down")),
 		Open:         key.NewBinding(key.WithKeys("right")),
 		Back:         key.NewBinding(key.WithKeys("left")),
+		Save:         key.NewBinding(key.WithKeys("ctrl+s")),
+		NewFile:      key.NewBinding(key.WithKeys("ctrl+n")),
+		Delete:       key.NewBinding(key.WithKeys("ctrl+d")),
 		ToggleHidden: key.NewBinding(key.WithKeys(".")),
+		SwitchLeft:   key.NewBinding(key.WithKeys("ctrl+left")),
+		SwitchRight:  key.NewBinding(key.WithKeys("ctrl+right")),
 		Tab:          key.NewBinding(key.WithKeys("tab")),
 		Help:         key.NewBinding(key.WithKeys("?")),
 		Close:        key.NewBinding(key.WithKeys("esc")),
 		Quit:         key.NewBinding(key.WithKeys("ctrl+q")),
-		ShowPath:     key.NewBinding(key.WithKeys("ctrl+p")),
+		ShowPath:     key.NewBinding(key.WithKeys("ctrl+p")), // Изменена клавиша "p" на "Ctrl+p" для отображения пути
 	}
 }
 
@@ -64,28 +70,37 @@ type model struct {
 	ready     bool
 	lastWrap  int
 
-	cwd        string
-	files      []fileItem
-	cursor     int
-	leftOffset int
-	showHidden bool
+	cwd        string     // current working directory
+	files      []fileItem // files in cwd
+	cursor     int        // which file is selected
+	leftOffset int        // offset for scrolling the left pane
+	showHidden bool       // show hidden files
 
-	vp             viewport.Model
-	renderer       *glamour.TermRenderer
-	current        string // current file path
-	currentContent string // raw file content (used for TOC)
-	active         string // "left", "right", "toc"
-	showHelp       bool
-	keys           keyMap
+	ta       textarea.Model // text area for editing files
+	vp       viewport.Model // viewport for previewing files
+	renderer *glamour.TermRenderer
+	current  string // current file being edited
+	mode     string // "edit" or "preview"
 
-	showPathPopup bool
-	filePath      string
+	active   string // "left", "right", "toc", "newfile"
+	showHelp bool
+	keys     keyMap
+
+	creatingFile bool
+	newFileName  string
+
+	deletingFile bool
+	deleteTarget *fileItem
+
+	showPathPopup bool   // Флаг для отображения popup с путем
+	filePath      string // Строка для хранения пути файла
 
 	// ---- TOC ----
-	tocVisible  bool
-	tocHeadings []Heading
-	tocCursor   int
-	tocOffset   int
+	tocVisible   bool
+	tocHeadings  []Heading
+	tocCursor    int
+	tocOffset    int
+	returnTarget string // "edit" или "preview"
 }
 
 // message sent when markdown renderer is built asynchronously
@@ -132,6 +147,12 @@ func parseHeadings(content string) []Heading {
 // ---------------- initialization ----------------
 
 func initialModel() model {
+	ta := textarea.New()
+	ta.Placeholder = " ** -> ** Откроет файл в панели редактора"
+	ta.ShowLineNumbers = true
+	ta.Cursor.Style = lipgloss.NewStyle().UnsetForeground()
+	ta.Blur()
+
 	vp := viewport.New(0, 0)
 	// Try to get initial terminal size to avoid undersized first render
 	w, h, termOK := 0, 0, false
@@ -151,36 +172,40 @@ func initialModel() model {
 		glamour.WithWordWrap(rightW-1),
 	)
 
-	cwd, _ := os.Getwd()
-	files := loadFiles(cwd, false)
+	cwd, _ := os.Getwd()           // current working directory
+	files := loadFiles(cwd, false) // load files in cwd
 
 	m := model{
-		width:          100,
-		height:         30,
-		leftWidth:      36,
-		ready:          false,
-		cwd:            cwd,
-		files:          files,
-		cursor:         0,
-		leftOffset:     0,
-		showHidden:     false,
-		vp:             vp,
-		renderer:       renderer,
-		current:        "",
-		currentContent: "",
-		active:         "left",
-		showHelp:       false,
-		keys:           newKeyMap(),
-		showPathPopup:  false,
-		filePath:       "",
-		tocVisible:     false,
-		tocHeadings:    nil,
-		tocCursor:      0,
-		tocOffset:      0,
+		width:         100,
+		height:        30,
+		leftWidth:     36,
+		ready:         false,
+		cwd:           cwd,
+		files:         files,
+		cursor:        0,
+		leftOffset:    0,
+		showHidden:    false,
+		ta:            ta,
+		vp:            vp,
+		renderer:      renderer,
+		current:       "",
+		mode:          "edit",
+		active:        "left",
+		showHelp:      false,
+		keys:          newKeyMap(),
+		showPathPopup: false,
+		filePath:      "",
+		tocVisible:    false,
+		tocHeadings:   nil,
+		tocCursor:     0,
+		tocOffset:     0,
+		returnTarget:  "",
 	}
 	if termOK {
 		m.width, m.height = w, h
 		m.ready = true
+		m.ta.SetWidth(rightW - 1)
+		m.ta.SetHeight(m.height - 2)
 		m.vp.Width = rightW - 1
 		m.vp.Height = m.height - 2
 		m.lastWrap = rightW - 1
@@ -300,6 +325,7 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
+
 	mPtr := &m
 
 	switch msg := msg.(type) {
@@ -314,6 +340,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if rightW < 20 {
 			rightW = 20
 		}
+		mPtr.ta.SetWidth(rightW - 1)
+		mPtr.ta.SetHeight(mPtr.height - 2)
 		mPtr.vp.Width = rightW - 1
 		mPtr.vp.Height = mPtr.height - 2
 		mPtr.ready = true
@@ -323,6 +351,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd = buildRendererCmd(wrap)
 		}
 		mPtr.clampLeftOffset()
+		// clamp TOC offset in case height changed
 		if mPtr.tocOffset < 0 {
 			mPtr.tocOffset = 0
 		}
@@ -344,7 +373,83 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return *mPtr, tea.Quit
 		}
 
-		// Toggle hidden files
+		// --- Новый файл (Ctrl+N) ---
+		if key.Matches(msg, mPtr.keys.NewFile) {
+			mPtr.creatingFile = true
+			mPtr.newFileName = ""
+			mPtr.active = "newfile"
+			return *mPtr, nil
+		}
+		if mPtr.creatingFile {
+			if msg.Type == tea.KeyEnter {
+				if mPtr.newFileName != "" {
+					newPath := filepath.Join(mPtr.cwd, mPtr.newFileName)
+					_ = os.WriteFile(newPath, []byte(""), 0644)
+					mPtr.files = loadFiles(mPtr.cwd, mPtr.showHidden)
+					mPtr.current = newPath
+					mPtr.ta.SetValue("")
+					mPtr.mode = "edit"
+					mPtr.active = "right"
+					mPtr.ta.Focus()
+				}
+				mPtr.creatingFile = false
+				return *mPtr, nil
+			}
+			if msg.Type == tea.KeyEsc {
+				mPtr.creatingFile = false
+				mPtr.active = "left"
+				return *mPtr, nil
+			}
+			if msg.Type == tea.KeyBackspace && len(mPtr.newFileName) > 0 {
+				mPtr.newFileName = mPtr.newFileName[:len(mPtr.newFileName)-1]
+				return *mPtr, nil
+			}
+			if len(msg.String()) == 1 && msg.Runes != nil {
+				mPtr.newFileName += msg.String()
+				return *mPtr, nil
+			}
+		}
+
+		// --- Удаление файла (Ctrl+D) ---
+		if key.Matches(msg, mPtr.keys.Delete) && mPtr.active == "left" && len(mPtr.files) > 0 {
+			it := mPtr.files[mPtr.cursor]
+			mPtr.deletingFile = true
+			mPtr.deleteTarget = &it
+			return *mPtr, nil
+		}
+		if mPtr.deletingFile {
+			if msg.String() == "y" || msg.String() == "Y" {
+				if mPtr.deleteTarget != nil {
+					oldCursor := mPtr.cursor
+					err := os.Remove(mPtr.deleteTarget.path)
+					if err != nil {
+						mPtr.ta.SetValue(fmt.Sprintf("Ошибка удаления: %v", err))
+					} else {
+						mPtr.files = loadFiles(mPtr.cwd, mPtr.showHidden)
+						if oldCursor >= len(mPtr.files) {
+							mPtr.cursor = len(mPtr.files) - 1
+						} else {
+							mPtr.cursor = oldCursor
+						}
+						if mPtr.cursor < 0 || len(mPtr.files) == 0 {
+							mPtr.cursor = 0
+						}
+						mPtr.clampLeftOffset()
+					}
+				}
+				mPtr.deletingFile = false
+				mPtr.deleteTarget = nil
+				return *mPtr, nil
+			}
+			if msg.String() == "n" || msg.Type == tea.KeyEsc {
+				mPtr.deletingFile = false
+				mPtr.deleteTarget = nil
+				return *mPtr, nil
+			}
+			return *mPtr, nil
+		}
+
+		// глобальные
 		if key.Matches(msg, mPtr.keys.ToggleHidden) {
 			mPtr.showHidden = !mPtr.showHidden
 			mPtr.files = loadFiles(mPtr.cwd, mPtr.showHidden)
@@ -357,34 +462,58 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			mPtr.clampLeftOffset()
 			return *mPtr, nil
 		}
+		if key.Matches(msg, mPtr.keys.SwitchLeft) {
+			mPtr.active = "left"
+			mPtr.ta.Blur()
+			return *mPtr, nil
+		}
+		if key.Matches(msg, mPtr.keys.SwitchRight) {
+			mPtr.active = "right"
+			if mPtr.mode == "edit" {
+				mPtr.ta.Focus()
+			}
+			return *mPtr, nil
+		}
 
-		// Show path popup
+		// Обработка нажатия клавиши "Ctrl+p"
 		if key.Matches(msg, mPtr.keys.ShowPath) && mPtr.current != "" {
 			mPtr.showPathPopup = true
 			mPtr.filePath = mPtr.current
 			return *mPtr, nil
 		}
+
+		// Закрытие popup с путем по нажатию Esc
 		if mPtr.showPathPopup && msg.Type == tea.KeyEsc {
 			mPtr.showPathPopup = false
 			return *mPtr, nil
 		}
 
-		// TOC toggle (Ctrl+T)
+		// --- TOC toggle (Ctrl+T) ---
+		// используем msg.String() == "ctrl+t" как раньше
 		if msg.String() == "ctrl+t" && strings.HasSuffix(strings.ToLower(mPtr.current), ".md") {
 			mPtr.tocVisible = !mPtr.tocVisible
 			if mPtr.tocVisible {
-				content := mPtr.currentContent
+				content := mPtr.ta.Value()
 				mPtr.tocHeadings = parseHeadings(content)
 				mPtr.tocCursor = 0
 				mPtr.tocOffset = 0
+				mPtr.returnTarget = mPtr.mode
 				mPtr.active = "toc"
 			} else {
-				mPtr.active = "right"
+				// скрываем TOC — возвращаем фокус туда, откуда пришли
+				if mPtr.returnTarget == "edit" {
+					mPtr.mode = "edit"
+					mPtr.active = "right"
+					mPtr.ta.Focus()
+				} else if mPtr.returnTarget == "preview" {
+					mPtr.mode = "preview"
+					mPtr.active = "right"
+				}
 			}
 			return *mPtr, nil
 		}
 
-		// left panel navigation
+		// левая панель
 		if mPtr.active == "left" {
 			visible := mPtr.height - 4
 			if key.Matches(msg, mPtr.keys.Up) {
@@ -436,8 +565,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return *mPtr, nil
 		}
 
-		// TOC navigation
+		// --- TOC navigation ---
 		if mPtr.active == "toc" {
+			// visible lines that fit inside TOC
 			visible := mPtr.height - 4
 			if visible < 1 {
 				visible = 1
@@ -446,12 +576,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// handle empty TOC
 			if len(mPtr.tocHeadings) == 0 {
 				if key.Matches(msg, mPtr.keys.Close) || msg.Type == tea.KeyEnter {
+					// close and return
 					mPtr.tocVisible = false
-					mPtr.active = "right"
+					if mPtr.returnTarget == "edit" {
+						mPtr.mode = "edit"
+						mPtr.active = "right"
+						mPtr.ta.Focus()
+					} else if mPtr.returnTarget == "preview" {
+						mPtr.mode = "preview"
+						mPtr.active = "right"
+					}
 				}
 				return *mPtr, nil
 			}
 
+			// Up
 			if key.Matches(msg, mPtr.keys.Up) {
 				if mPtr.tocCursor > 0 {
 					mPtr.tocCursor--
@@ -461,6 +600,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return *mPtr, nil
 			}
+			// Down
 			if key.Matches(msg, mPtr.keys.Down) {
 				if mPtr.tocCursor < len(mPtr.tocHeadings)-1 {
 					mPtr.tocCursor++
@@ -471,47 +611,115 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return *mPtr, nil
 			}
 
-			// Enter or Right: navigate to heading by rendering the markdown starting from that heading
-			if msg.Type == tea.KeyEnter || key.Matches(msg, mPtr.keys.Open) {
-				h := mPtr.tocHeadings[mPtr.tocCursor]
-				targetLine := h.Line
-				if targetLine < 0 {
-					targetLine = 0
+			// Enter — просто закрыть TOC и вернуться туда, откуда пришли
+			if msg.Type == tea.KeyEnter {
+				if mPtr.returnTarget == "edit" {
+					mPtr.mode = "edit"
+					mPtr.active = "right"
+					mPtr.ta.Focus()
+				} else if mPtr.returnTarget == "preview" {
+					mPtr.mode = "preview"
+					mPtr.active = "right"
 				}
-				lines := strings.Split(mPtr.currentContent, "\n")
-				if targetLine >= len(lines) {
-					targetLine = 0
-				}
-				sub := strings.Join(lines[targetLine:], "\n")
-
-				// Render the substring and set viewport content
-				out, err := mPtr.renderer.Render(sub)
-				if err != nil {
-					// if render failed, fall back to plain text (with possible syntax highlight for code files)
-					mPtr.vp.SetContent(sub)
-				} else {
-					mPtr.vp.SetContent(out)
-				}
-
 				mPtr.tocVisible = false
-				mPtr.active = "right"
 				return *mPtr, nil
 			}
 
-			// Esc — close TOC
+			// Right Arrow — перейти к выбранному заголовку (в редактор)
+			if key.Matches(msg, mPtr.keys.Open) && len(mPtr.tocHeadings) > 0 {
+				// вычисляем целевую строку
+				targetLine := mPtr.tocHeadings[mPtr.tocCursor].Line
+				// перемещаем фокус в редактор и ставим курсор точно в начало целевой строки
+				mPtr.mode = "edit"
+				mPtr.active = "right"
+				mPtr.ta.Focus()
+				content := mPtr.ta.Value()
+				if targetLine < 0 {
+					targetLine = 0
+				}
+				// Найдём байтовый индекс начала targetLine
+				idx := 0
+				for line := 0; line < targetLine && idx < len(content); line++ {
+					nl := strings.IndexByte(content[idx:], '\n')
+					if nl < 0 {
+						idx = len(content)
+						break
+					}
+					idx += nl + 1
+				}
+				if idx < 0 {
+					idx = 0
+				}
+				if idx > len(content) {
+					idx = len(content)
+				}
+				mPtr.ta.SetCursor(idx)
+				mPtr.tocVisible = false
+				return *mPtr, nil
+			}
+
+			// Esc — закрыть TOC
 			if key.Matches(msg, mPtr.keys.Close) {
 				mPtr.tocVisible = false
-				mPtr.active = "right"
+				if mPtr.returnTarget == "edit" {
+					mPtr.mode = "edit"
+					mPtr.active = "right"
+					mPtr.ta.Focus()
+				} else if mPtr.returnTarget == "preview" {
+					mPtr.mode = "preview"
+					mPtr.active = "right"
+				}
 				return *mPtr, nil
 			}
 
 			return *mPtr, nil
 		}
 
-		// right panel: allow scrolling etc. via viewport.Update
+		// правая панель
+		if key.Matches(msg, mPtr.keys.Save) {
+			mPtr.saveCurrent()
+			return *mPtr, nil
+		}
+		if key.Matches(msg, mPtr.keys.Tab) {
+			if mPtr.current == "" {
+				return *mPtr, nil
+			}
+			if mPtr.mode == "edit" {
+				content := mPtr.ta.Value()
+				displayContent := content
+				if strings.HasSuffix(strings.ToLower(mPtr.current), ".go") || strings.HasSuffix(strings.ToLower(mPtr.current), ".py") {
+					if highlighted, err := highlightSyntax(content, mPtr.current); err == nil {
+						displayContent = highlighted
+					}
+				}
+
+				if strings.HasSuffix(strings.ToLower(mPtr.current), ".md") {
+					out, err := mPtr.renderer.Render(content)
+					if err != nil {
+						mPtr.vp.SetContent(displayContent)
+					} else {
+						mPtr.vp.SetContent(out)
+					}
+				} else {
+					mPtr.vp.SetContent(displayContent)
+				}
+				mPtr.mode = "preview"
+				mPtr.ta.Blur()
+			} else {
+				mPtr.mode = "edit"
+				mPtr.ta.Focus()
+			}
+			return *mPtr, nil
+		}
 		if mPtr.active == "right" {
-			mPtr.vp, cmd = mPtr.vp.Update(msg)
-			return *mPtr, cmd
+			if mPtr.mode == "edit" {
+				mPtr.ta, cmd = mPtr.ta.Update(msg)
+				return *mPtr, cmd
+			}
+			if mPtr.mode == "preview" {
+				mPtr.vp, cmd = mPtr.vp.Update(msg)
+				return *mPtr, cmd
+			}
 		}
 	}
 
@@ -549,39 +757,66 @@ func (m *model) openSelected() {
 	}
 	data, err := os.ReadFile(it.path)
 	if err != nil {
-		m.vp.SetContent(fmt.Sprintf("Ошибка чтения: %v", err))
+		m.ta.SetValue(fmt.Sprintf("Ошибка чтения: %v", err))
 		m.current = ""
-		m.currentContent = ""
 		return
 	}
 
 	content := string(data)
-	m.current = it.path
-	m.currentContent = content
+	highlightedContent := content
+	if strings.HasSuffix(strings.ToLower(it.path), ".go") || strings.HasSuffix(strings.ToLower(it.path), ".py") {
+		if highlighted, err := highlightSyntax(content, it.path); err == nil {
+			highlightedContent = highlighted
+		}
+	}
 
-	// Display logic
+	m.ta.SetValue(content) // В редакторе показываем оригинальный текст без подсветки
+	m.current = it.path
+
 	if strings.HasSuffix(strings.ToLower(it.path), ".md") {
 		out, err := m.renderer.Render(content)
 		if err != nil {
-			m.vp.SetContent(content)
+			m.vp.SetContent(highlightedContent)
 		} else {
 			m.vp.SetContent(out)
 		}
 	} else {
-		displayContent := content
-		if strings.HasSuffix(strings.ToLower(it.path), ".go") || strings.HasSuffix(strings.ToLower(it.path), ".py") {
-			if highlighted, err := highlightSyntax(content, it.path); err == nil {
-				displayContent = highlighted
-			}
+		m.vp.SetContent(highlightedContent)
+	}
+	m.mode = "edit"
+	m.active = "right"
+	m.ta.Focus()
+}
+
+func (m *model) saveCurrent() {
+	if m.current == "" {
+		return
+	}
+	_ = os.WriteFile(m.current, []byte(m.ta.Value()), 0644)
+
+	content := m.ta.Value()
+	displayContent := content
+	if strings.HasSuffix(strings.ToLower(m.current), ".go") || strings.HasSuffix(strings.ToLower(m.current), ".py") {
+		if highlighted, err := highlightSyntax(content, m.current); err == nil {
+			displayContent = highlighted
 		}
-		m.vp.SetContent(displayContent)
 	}
 
-	m.active = "right"
+	if strings.HasSuffix(strings.ToLower(m.current), ".md") {
+		out, err := m.renderer.Render(content)
+		if err != nil {
+			m.vp.SetContent(displayContent)
+		} else {
+			m.vp.SetContent(out)
+		}
+	} else {
+		m.vp.SetContent(displayContent)
+	}
 }
 
 // ---------------- view ----------------
 
+// pathPopup - Отображает popup окно с путем к файлу
 func (m model) pathPopup() string {
 	pathText := fmt.Sprintf("Путь к файлу:\n%s", m.filePath)
 	pathStyle := lipgloss.NewStyle().
@@ -596,13 +831,19 @@ func (m model) helpPopup() string {
 	helpText := `Справка
 
 ↑ / ↓      — перемещение по списку файлов / TOC
-→          — открыть файл / перейти в директорию / в TOC — перейти к заголовку
+→          — открыть файл / войти в директорию
 ←          — уровень выше (или назад)
 .          — показать/скрыть скрытые файлы
+Ctrl+N     — создать новый файл
+Ctrl+D     — удалить файл
+Tab        — переключить Редактор ↔ Предпросмотр
+Ctrl+S     — сохранить файл
+Ctrl+←/→   — переключить активную панель
 ?          — показать/скрыть справку
 Ctrl+Q     — выйти
 Ctrl+P     — показать путь к файлу
-Ctrl+T     — показать/скрыть TOC (для .md)`
+Ctrl+T     — показать/скрыть TOC (для .md)
+→ (в TOC)  — перейти к выбранному заголовку`
 	helpStyle := lipgloss.NewStyle().
 		Width(60).
 		Border(lipgloss.RoundedBorder()).
@@ -613,6 +854,7 @@ Ctrl+T     — показать/скрыть TOC (для .md)`
 
 // truncateString обрезает строку до заданной ширины и добавляет "..." в конце
 func (m model) truncateString(s string, width int) string {
+	// width-aware by display cells, safe for CJK/emoji
 	if width <= 0 {
 		return ""
 	}
@@ -629,6 +871,7 @@ func (m model) truncateString(s string, width int) string {
 }
 
 func (m model) View() string {
+	// Avoid rendering layout until we know actual terminal size
 	if !m.ready {
 		return ""
 	}
@@ -638,29 +881,46 @@ func (m model) View() string {
 	if m.showHelp {
 		return m.helpPopup()
 	}
+	if m.creatingFile {
+		prompt := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("205")).
+			Padding(1, 2).
+			Render("Введите имя файла: " + m.newFileName)
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, prompt)
+	}
+	if m.deletingFile && m.deleteTarget != nil {
+		prompt := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("1")).
+			Padding(1, 2).
+			Render(fmt.Sprintf("Удалить «%s»? (y/n)", m.deleteTarget.name))
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, prompt)
+	}
 
+	innerH := m.height - 4
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	leftStyle := lipgloss.NewStyle().Width(m.leftWidth).Height(innerH+2).MarginTop(1).Padding(0, 1).Border(lipgloss.RoundedBorder())
+	rightW := m.width - m.leftWidth - 4
+	if rightW < 20 {
+		rightW = 20
+	}
+	rightStyle := lipgloss.NewStyle().Width(rightW).Height(innerH+1).MarginTop(1).Padding(0, 0).Border(lipgloss.RoundedBorder())
+
+	if m.active == "left" {
+		leftStyle = leftStyle.BorderForeground(lipgloss.Color("205"))
+		rightStyle = rightStyle.BorderForeground(lipgloss.Color("240"))
+	} else {
+		leftStyle = leftStyle.BorderForeground(lipgloss.Color("240"))
+		rightStyle = rightStyle.BorderForeground(lipgloss.Color("205"))
+	}
+
+	// если TOC видим — рисуем его в левой панели
 	if m.tocVisible {
-		// Draw TOC in left panel
-		innerH := m.height - 4
-		if innerH < 1 {
-			innerH = 1
-		}
-		leftStyle := lipgloss.NewStyle().Width(m.leftWidth).Height(innerH+2).MarginTop(1).Padding(0, 1).Border(lipgloss.RoundedBorder())
-		rightW := m.width - m.leftWidth - 4
-		if rightW < 20 {
-			rightW = 20
-		}
-		rightStyle := lipgloss.NewStyle().Width(rightW).Height(innerH+1).MarginTop(1).Padding(0, 0).Border(lipgloss.RoundedBorder())
-
-		if m.active == "left" {
-			leftStyle = leftStyle.BorderForeground(lipgloss.Color("205"))
-			rightStyle = rightStyle.BorderForeground(lipgloss.Color("240"))
-		} else {
-			leftStyle = leftStyle.BorderForeground(lipgloss.Color("240"))
-			rightStyle = rightStyle.BorderForeground(lipgloss.Color("205"))
-		}
-
-		visible := innerH
+		visible := innerH // lines that fit inside the panel
 		if visible < 1 {
 			visible = 1
 		}
@@ -677,23 +937,32 @@ func (m model) View() string {
 		for i := start; i < end; i++ {
 			h := m.tocHeadings[i]
 			indent := strings.Repeat("  ", h.Level-1)
-			contentWidth := m.leftWidth - 4
+
+			// ширина панели без рамок и паддингов
+			contentWidth := m.leftWidth - 4 // рамка + Padding(0,1)
 			maxLen := contentWidth - len(indent)
 			if maxLen < 1 {
 				maxLen = 1
 			}
+
 			title := m.truncateString(h.Title, maxLen)
 			line := fmt.Sprintf("%s%s", indent, title)
+
+			// Стилизация ТОЛЬКО после обрезания
 			if i == m.tocCursor {
+				// убираем всё лишнее форматирование, только цвет и bold
 				line = lipgloss.NewStyle().
 					Foreground(lipgloss.Color("205")).
 					Bold(true).
-					Width(contentWidth).
+					Width(contentWidth). // выравнивание по ширине без расширения
 					MaxWidth(contentWidth).
 					Render(line)
 			}
+
 			b.WriteString(line + "\n")
 		}
+
+		// pad to visible
 		written := end - start
 		for i := 0; i < visible-written; i++ {
 			b.WriteString("\n")
@@ -708,30 +977,18 @@ func (m model) View() string {
 			BorderForeground(lipgloss.Color("205"))
 
 		toc := tocStyle.Render(b.String())
-		right := rightStyle.Render(m.vp.View())
+
+		var right string
+		if m.mode == "preview" {
+			right = rightStyle.Render(m.vp.View())
+		} else {
+			right = rightStyle.Render(m.ta.View())
+		}
+
 		return "\n" + lipgloss.JoinHorizontal(lipgloss.Bottom, toc, right)
 	}
 
 	// обычная файловая панель слева
-	innerH := m.height - 4
-	if innerH < 1 {
-		innerH = 1
-	}
-	leftStyle := lipgloss.NewStyle().Width(m.leftWidth).Height(innerH+2).MarginTop(1).Padding(0, 1).Border(lipgloss.RoundedBorder())
-	rightW := m.width - m.leftWidth - 4
-	if rightW < 20 {
-		rightW = 20
-	}
-	rightStyle := lipgloss.NewStyle().Width(rightW).Height(innerH+1).MarginTop(1).Padding(0, 0).Border(lipgloss.RoundedBorder())
-
-	if m.active == "left" {
-		leftStyle = leftStyle.BorderForeground(lipgloss.Color("205"))
-		rightStyle = rightStyle.BorderForeground(lipgloss.Color("240"))
-	} else {
-		leftStyle = leftStyle.BorderForeground(lipgloss.Color("240"))
-		rightStyle = rightStyle.BorderForeground(lipgloss.Color("205"))
-	}
-
 	var leftBuilder strings.Builder
 	start := m.leftOffset
 	end := start + innerH
@@ -741,7 +998,7 @@ func (m model) View() string {
 	for i := start; i < end; i++ {
 		f := m.files[i]
 		line := f.name
-		line = m.truncateString(line, m.leftWidth-2)
+		line = m.truncateString(line, m.leftWidth-2) // -2 для отступа/padding
 		if i == m.cursor && m.active == "left" {
 			line = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render(line)
 		}
@@ -756,7 +1013,13 @@ func (m model) View() string {
 	}
 	left := leftStyle.Render(leftBuilder.String())
 
-	right := rightStyle.Render(m.vp.View())
+	var right string
+	if m.active == "right" && m.mode == "preview" {
+		right = rightStyle.Render(m.vp.View())
+	} else {
+		right = rightStyle.Render(m.ta.View())
+	}
+
 	return "\n" + lipgloss.JoinHorizontal(lipgloss.Bottom, left, right)
 }
 
