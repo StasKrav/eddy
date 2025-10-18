@@ -32,6 +32,8 @@ type keyMap struct {
 	Tab, Help, Close key.Binding
 	Quit             key.Binding
 	ShowPath         key.Binding
+	ToggleTOC        key.Binding
+	ShowFiles        key.Binding
 }
 
 func newKeyMap() keyMap {
@@ -46,6 +48,8 @@ func newKeyMap() keyMap {
 		Close:        key.NewBinding(key.WithKeys("esc")),
 		Quit:         key.NewBinding(key.WithKeys("ctrl+q")),
 		ShowPath:     key.NewBinding(key.WithKeys("ctrl+p")),
+		ToggleTOC:    key.NewBinding(key.WithKeys("t")),
+		ShowFiles:    key.NewBinding(key.WithKeys("f")),
 	}
 }
 
@@ -86,6 +90,9 @@ type model struct {
 	tocHeadings []Heading
 	tocCursor   int
 	tocOffset   int
+
+	// ---- File Manager ----
+	showFiles bool
 }
 
 // message sent when markdown renderer is built asynchronously
@@ -177,6 +184,7 @@ func initialModel() model {
 		tocHeadings:    nil,
 		tocCursor:      0,
 		tocOffset:      0,
+		showFiles:      true, // показывать ФМ при запуске
 	}
 	if termOK {
 		m.width, m.height = w, h
@@ -370,33 +378,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// TOC toggle (Ctrl+T)
-		if msg.String() == "ctrl+t" && strings.HasSuffix(strings.ToLower(mPtr.current), ".md") {
+		// t — показать/скрыть TOC
+		if key.Matches(msg, mPtr.keys.ToggleTOC) && strings.HasSuffix(strings.ToLower(mPtr.current), ".md") {
 			mPtr.tocVisible = !mPtr.tocVisible
 			if mPtr.tocVisible {
-				content := mPtr.currentContent
-				mPtr.tocHeadings = parseHeadings(content)
-				mPtr.tocCursor = 0
-				mPtr.tocOffset = 0
+				mPtr.tocHeadings = parseHeadings(mPtr.currentContent)
+				mPtr.tocCursor, mPtr.tocOffset = 0, 0
 				mPtr.active = "toc"
 			} else {
 				mPtr.active = "right"
 			}
 			return *mPtr, nil
 		}
-		// переключение между панелями по Tab
-		if key.Matches(msg, mPtr.keys.Tab) {
-			switch mPtr.active {
-			case "left":
-				if mPtr.tocVisible {
-					mPtr.active = "toc"
-				} else {
-					mPtr.active = "right"
-				}
-			case "toc":
-				mPtr.active = "right"
-			case "right":
-				mPtr.active = "left"
-			}
+
+		// f — показать/скрыть файловый менеджер
+		// t — режим документа (TOC + просмотр)
+		if key.Matches(msg, mPtr.keys.ToggleTOC) {
+			mPtr.tocVisible = true
+			mPtr.active = "toc"
+			return *mPtr, nil
+		}
+
+		// f — режим файлового менеджера
+		if key.Matches(msg, mPtr.keys.ShowFiles) {
+			mPtr.tocVisible = false
+			mPtr.active = "left"
 			return *mPtr, nil
 		}
 
